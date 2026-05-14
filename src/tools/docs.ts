@@ -7,6 +7,8 @@ import { wsUrlFromGraphQLEndpoint, connectWorkspaceSocket, joinWorkspace, loadDo
 import * as Y from "yjs";
 import { parseMarkdownToOperations } from "../markdown/parse.js";
 import { renderBlocksToMarkdown } from "../markdown/render.js";
+import { parseAtlasFrontmatter } from "../markdown/frontmatter.js";
+import { mapFrontmatter, applyAtlasMetadataInSession } from "../atlas/index.js";
 import type { MarkdownOperation, MarkdownRenderableBlock, TextDelta } from "../markdown/types.js";
 import {
   type Bound,
@@ -5220,10 +5222,19 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     markdown: string;
     strict?: boolean;
     parentDocId?: string;
+    parseFrontmatter?: boolean;
   }) => {
-    const parsedMarkdown = parseMarkdownToOperations(parsed.markdown);
+    const fmEnabled = parsed.parseFrontmatter !== false;
+    const fmParsed = fmEnabled ? parseAtlasFrontmatter(parsed.markdown) : { body: parsed.markdown, meta: {}, warnings: [], hadFrontmatter: false } as ReturnType<typeof parseAtlasFrontmatter>;
+    const mappedFrontmatter = fmEnabled ? mapFrontmatter(fmParsed) : null;
+    const bodyMarkdown = fmEnabled ? fmParsed.body : parsed.markdown;
+
+    const parsedMarkdown = parseMarkdownToOperations(bodyMarkdown);
     let operations = [...parsedMarkdown.operations];
     let title = (parsed.title ?? "").trim();
+    if (!title && mappedFrontmatter?.title) {
+      title = mappedFrontmatter.title.trim();
+    }
     if (!title && operations.length > 0) {
       const first = operations[0];
       if (first.type === "heading" && first.level === 1) {
@@ -5267,19 +5278,30 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
       applyWarnings.push(`${applied.skippedCount} markdown block(s) could not be applied to AFFiNE and were skipped.`);
     }
 
+    let atlasResult: { propertiesApplied: string[]; timestampsUpdated: string[]; warnings: string[] } | null = null;
+    if (mappedFrontmatter && (Object.keys(mappedFrontmatter.customProperties).length > 0 || mappedFrontmatter.createdAtMs != null || mappedFrontmatter.updatedAtMs != null)) {
+      try {
+        atlasResult = await applyAtlasMetadataInSession(gql, created.workspaceId, created.docId, mappedFrontmatter);
+      } catch (err) {
+        applyWarnings.push(`atlas metadata apply failed: ${(err as Error).message}`);
+      }
+    }
+
     return {
       workspaceId: created.workspaceId,
       docId: created.docId,
       title: created.title,
       parentDocId: placement.parentDocId,
       linkedToParent: placement.linkedToParent,
-      warnings: mergeWarnings(parsedMarkdown.warnings, applyWarnings, placement.warnings),
+      warnings: mergeWarnings(parsedMarkdown.warnings, applyWarnings, placement.warnings, mappedFrontmatter?.warnings ?? [], atlasResult?.warnings ?? []),
       lossy: parsedMarkdown.lossy || applied.skippedCount > 0,
       stats: {
         parsedBlocks: parsedMarkdown.operations.length,
         appliedBlocks: applied.appendedCount,
         skippedBlocks: applied.skippedCount,
       },
+      atlas: atlasResult,
+      frontmatter: fmEnabled ? { hadFrontmatter: fmParsed.hadFrontmatter, mappedTitle: mappedFrontmatter?.title ?? null, tagsFromFrontmatter: mappedFrontmatter?.tags ?? [], extras: mappedFrontmatter?.extras ?? {} } : null,
     };
   };
 
@@ -5289,6 +5311,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
     markdown: string;
     strict?: boolean;
     parentDocId?: string;
+    parseFrontmatter?: boolean;
   }) => {
     return receipt("doc.create_from_markdown", await createDocFromMarkdownCore(parsed));
   };
@@ -5303,6 +5326,7 @@ export function registerDocTools(server: McpServer, gql: GraphQLClient, defaults
         markdown: MarkdownContent.describe("Markdown content to import"),
         strict: z.boolean().optional(),
         parentDocId: z.string().optional().describe("If provided, the new doc is automatically embedded into this parent doc as a linked child (visible in sidebar)."),
+        parseFrontmatter: z.boolean().optional().describe("Default true. When true, leading YAML frontmatter is stripped from the body and mapped to AFFiNE DocMeta (title, createDate, updatedDate) plus Atlas custom properties (atlas_id, atlas_type, atlas_status, etc.). Call bootstrap_atlas_schema once per workspace before relying on custom properties."),
       },
     },
     createDocFromMarkdownHandler as any
