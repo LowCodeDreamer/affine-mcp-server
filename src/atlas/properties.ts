@@ -17,10 +17,12 @@ async function hydrateSubDoc(
   if (snapshot.missing) {
     Y.applyUpdate(doc, Buffer.from(snapshot.missing, "base64"));
   }
-  if (snapshot.state) {
-    Y.applyUpdate(doc, Buffer.from(snapshot.state, "base64"));
-  }
-  const prevSV = Y.encodeStateVector(doc);
+  // snapshot.state is a state vector (not an update). Use it as prevSV so we only
+  // push the diff AFFiNE doesn't already have. Falling back to local SV is safe
+  // for new sub-docs where state is absent.
+  const prevSV = snapshot.state
+    ? Buffer.from(snapshot.state, "base64")
+    : Y.encodeStateVector(doc);
   return { doc, prevSV };
 }
 
@@ -123,8 +125,9 @@ export async function setDocMetaTimestamps(
   const wsSnapshot = await loadDoc(socket, workspaceId, workspaceId);
   const wsDoc = new Y.Doc();
   if (wsSnapshot.missing) Y.applyUpdate(wsDoc, Buffer.from(wsSnapshot.missing, "base64"));
-  if (wsSnapshot.state) Y.applyUpdate(wsDoc, Buffer.from(wsSnapshot.state, "base64"));
-  const wsPrevSV = Y.encodeStateVector(wsDoc);
+  const wsPrevSV = wsSnapshot.state
+    ? Buffer.from(wsSnapshot.state, "base64")
+    : Y.encodeStateVector(wsDoc);
 
   const wsMeta = wsDoc.getMap<any>("meta");
   const pages = wsMeta.get("pages") as Y.Array<Y.Map<any>> | undefined;
@@ -146,8 +149,9 @@ export async function setDocMetaTimestamps(
   const docSnapshot = await loadDoc(socket, workspaceId, docId);
   const doc = new Y.Doc();
   if (docSnapshot.missing) Y.applyUpdate(doc, Buffer.from(docSnapshot.missing, "base64"));
-  if (docSnapshot.state) Y.applyUpdate(doc, Buffer.from(docSnapshot.state, "base64"));
-  const prevSV = Y.encodeStateVector(doc);
+  const prevSV = docSnapshot.state
+    ? Buffer.from(docSnapshot.state, "base64")
+    : Y.encodeStateVector(doc);
   const meta = doc.getMap<any>("meta");
   if (createMs != null) { meta.set("createDate", createMs); updated.push("doc.meta.createDate"); }
   if (updateMs != null) { meta.set("updatedDate", updateMs); updated.push("doc.meta.updatedDate"); }
